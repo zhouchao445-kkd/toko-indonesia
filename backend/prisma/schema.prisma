@@ -1,0 +1,821 @@
+// Prisma Schema for @ecommerce/backend
+// Indonesian E-Commerce Platform - P2 Data Layer
+// Database: Supabase PostgreSQL
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum UserRole {
+  CUSTOMER
+  VIP
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PENDING_VERIFICATION
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  BALANCE
+}
+
+enum PaymentProofStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum WithdrawalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  COMPLETED
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  PURCHASE
+  REFUND
+  ADJUSTMENT
+}
+
+enum CouponType {
+  FIXED
+  PERCENTAGE
+}
+
+enum CouponStatus {
+  ACTIVE
+  EXPIRED
+  USED
+}
+
+enum AdType {
+  BANNER
+  POPUP
+  SCHEDULED
+}
+
+enum MessageSender {
+  CUSTOMER
+  ADMIN
+}
+
+enum OperationAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+// ============================================
+// USERS DOMAIN
+// ============================================
+
+/// Members/Customers
+model users {
+  id              String      @id @default(uuid()) @db.Uuid
+  phone           String      @unique @db.VarChar(20)
+  password_hash   String      @db.VarChar(255)
+  nickname        String?     @db.VarChar(100)
+  avatar_url      String?     @db.Text
+  role            UserRole    @default(CUSTOMER)
+  is_active       Boolean     @default(true)
+  created_at      DateTime    @default(now()) @db.Timestamptz
+  updated_at      DateTime    @updatedAt @db.Timestamptz
+
+  // Relations
+  addresses       user_addresses[]
+  balance         balances?
+  coupons         user_coupons[]
+  orders          orders[]
+  reviews         reviews[]
+  conversations   conversations[]
+
+  @@map("users")
+}
+
+/// User shipping addresses
+model user_addresses {
+  id              String    @id @default(uuid()) @db.Uuid
+  user_id         String    @db.Uuid
+  receiver_name   String    @db.VarChar(100)
+  receiver_phone  String    @db.VarChar(20)
+  province        String    @db.VarChar(100)
+  city            String    @db.VarChar(100)
+  district        String    @db.VarChar(100)
+  address_line    String    @db.Text
+  postal_code     String?   @db.VarChar(10)
+  is_default      Boolean   @default(false)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  // Relations
+  user            users     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("user_addresses")
+}
+
+// ============================================
+// ADMIN DOMAIN
+// ============================================
+
+/// Backend admin accounts
+model admins {
+  id              String    @id @default(uuid()) @db.Uuid
+  username        String    @unique @db.VarChar(50)
+  password_hash   String    @db.VarChar(255)
+  full_name       String    @db.VarChar(100)
+  email           String?   @unique @db.VarChar(100)
+  is_active       Boolean   @default(true)
+  last_login_at   DateTime? @db.Timestamptz
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  // Relations
+  role_assignments admin_role_assignments[]
+  operation_logs  operation_logs[]
+
+  @@map("admins")
+}
+
+/// Role definitions
+model roles {
+  id              String    @id @default(uuid()) @db.Uuid
+  name            String    @unique @db.VarChar(50)
+  display_name    String    @db.VarChar(100)
+  description     String?   @db.Text
+  is_system       Boolean   @default(false) // System roles cannot be deleted
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  // Relations
+  admin_assignments admin_role_assignments[]
+  permissions     role_permissions[]
+
+  @@map("roles")
+}
+
+/// Permission definitions
+model permissions {
+  id              String    @id @default(uuid()) @db.Uuid
+  code            String    @unique @db.VarChar(100) // e.g., "products.create", "orders.view"
+  name            String    @db.VarChar(100)
+  module          String    @db.VarChar(50) // e.g., "products", "orders", "finance"
+  description     String?   @db.Text
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  // Relations
+  roles           role_permissions[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+/// Many-to-many: admins <-> roles
+model admin_role_assignments {
+  id              String    @id @default(uuid()) @db.Uuid
+  admin_id        String    @db.Uuid
+  role_id         String    @db.Uuid
+  assigned_at     DateTime  @default(now()) @db.Timestamptz
+
+  // Relations
+  admin           admins    @relation(fields: [admin_id], references: [id], onDelete: Cascade)
+  role            roles     @relation(fields: [role_id], references: [id], onDelete: Cascade)
+
+  @@unique([admin_id, role_id])
+  @@index([admin_id])
+  @@index([role_id])
+  @@map("admin_role_assignments")
+}
+
+/// Many-to-many: roles <-> permissions
+model role_permissions {
+  id              String      @id @default(uuid()) @db.Uuid
+  role_id         String      @db.Uuid
+  permission_id   String      @db.Uuid
+  assigned_at     DateTime    @default(now()) @db.Timestamptz
+
+  // Relations
+  role            roles       @relation(fields: [role_id], references: [id], onDelete: Cascade)
+  permission      permissions @relation(fields: [permission_id], references: [id], onDelete: Cascade)
+
+  @@unique([role_id, permission_id])
+  @@index([role_id])
+  @@index([permission_id])
+  @@map("role_permissions")
+}
+
+// ============================================
+// PRODUCTS DOMAIN
+// ============================================
+
+/// Product categories (with icons)
+model categories {
+  id              String    @id @default(uuid()) @db.Uuid
+  name            String    @db.VarChar(100)
+  icon_url        String?   @db.Text
+  icon_emoji      String?   @db.VarChar(10)
+  sort_order      Int       @default(0)
+  is_active       Boolean   @default(true)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  // Relations
+  products        products[]
+
+  @@map("categories")
+}
+
+/// Products
+model products {
+  id              String    @id @default(uuid()) @db.Uuid
+  category_id     String    @db.Uuid
+  name            String    @db.VarChar(255)
+  description     String?   @db.Text
+  price           Decimal   @db.Decimal(12, 2)
+  stock           Int       @default(0)
+  is_active       Boolean   @default(true)
+  sort_order      Int       @default(0)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  // Relations
+  category        categories @relation(fields: [category_id], references: [id], onDelete: Restrict)
+  images          product_images[]
+  params          product_params[]
+  order_items     order_items[]
+  reviews         reviews[]
+
+  @@index([category_id])
+  @@index([is_active, sort_order])
+  @@map("products")
+}
+
+/// Product images (max 9 per product)
+model product_images {
+  id              String    @id @default(uuid()) @db.Uuid
+  product_id      String    @db.Uuid
+  image_url       String    @db.Text
+  sort_order      Int       @default(0)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  // Relations
+  product         products  @relation(fields: [product_id], references: [id], onDelete: Cascade)
+
+  @@index([product_id])
+  @@map("product_images")
+}
+
+/// Product parameters/specifications
+model product_params {
+  id              String    @id @default(uuid()) @db.Uuid
+  product_id      String    @db.Uuid
+  param_name      String    @db.VarChar(100)
+  param_value     String    @db.VarChar(255)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  // Relations
+  product         products  @relation(fields: [product_id], references: [id], onDelete: Cascade)
+
+  @@index([product_id])
+  @@map("product_params")
+}
+
+// ============================================
+// ORDERS DOMAIN
+// ============================================
+
+/// Orders
+model orders {
+  id                String        @id @default(uuid()) @db.Uuid
+  order_no          String        @unique @db.VarChar(32)
+  user_id           String        @db.Uuid
+  total_amount      Decimal       @db.Decimal(12, 2)
+  shipping_fee      Decimal       @default(0) @db.Decimal(10, 2)
+  discount_amount   Decimal       @default(0) @db.Decimal(10, 2)
+  final_amount      Decimal       @db.Decimal(12, 2)
+  status            OrderStatus   @default(PENDING_PAYMENT)
+  payment_method    PaymentMethod?
+  coupon_id         String?       @db.Uuid
+  shipping_method_id String?      @db.Uuid
+  shipping_address  String        @db.Text
+  receiver_name     String        @db.VarChar(100)
+  receiver_phone    String        @db.VarChar(20)
+  notes             String?       @db.Text
+  paid_at           DateTime?     @db.Timestamptz
+  shipped_at        DateTime?     @db.Timestamptz
+  completed_at      DateTime?     @db.Timestamptz
+  cancelled_at      DateTime?     @db.Timestamptz
+  created_at        DateTime      @default(now()) @db.Timestamptz
+  updated_at        DateTime      @updatedAt @db.Timestamptz
+
+  // Relations
+  user              users         @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  items             order_items[]
+  payment_proofs    payment_proofs[]
+  shipments         shipments[]
+
+  @@index([user_id])
+  @@index([status])
+  @@index([created_at])
+  @@map("orders")
+}
+
+/// Order line items
+model order_items {
+  id              String    @id @default(uuid()) @db.Uuid
+  order_id        String    @db.Uuid
+  product_id      String    @db.Uuid
+  product_name    String    @db.VarChar(255) // Snapshot at order time
+  product_image   String?   @db.Text // Snapshot at order time
+  unit_price      Decimal   @db.Decimal(12, 2)
+  quantity        Int
+  subtotal        Decimal   @db.Decimal(12, 2)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  // Relations
+  order           orders    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product         products  @relation(fields: [product_id], references: [id], onDelete: Restrict)
+
+  @@index([order_id])
+  @@map("order_items")
+}
+
+/// Payment proofs (bank transfer uploads)
+model payment_proofs {
+  id              String              @id @default(uuid()) @db.Uuid
+  order_id        String              @db.Uuid
+  bank_name       String              @db.VarChar(100)
+  account_number  String              @db.VarChar(50)
+  account_name    String              @db.VarChar(100)
+  transfer_amount Decimal             @db.Decimal(12, 2)
+  transfer_date   DateTime            @db.Timestamptz
+  proof_image_url String              @db.Text
+  status          PaymentProofStatus  @default(PENDING)
+  reviewed_by     String?             @db.Uuid
+  reviewed_at     DateTime?           @db.Timestamptz
+  review_notes    String?             @db.Text
+  created_at      DateTime            @default(now()) @db.Timestamptz
+
+  // Relations
+  order           orders              @relation(fields: [order_id], references: [id], onDelete: Cascade)
+
+  @@index([order_id])
+  @@index([status])
+  @@map("payment_proofs")
+}
+
+/// Shipments (multiple couriers allowed per order)
+model shipments {
+  id              String    @id @default(uuid()) @db.Uuid
+  order_id        String    @db.Uuid
+  courier_name    String    @db.VarChar(100)
+  tracking_number String    @db.VarChar(100)
+  shipped_at      DateTime  @default(now()) @db.Timestamptz
+  delivered_at    DateTime? @db.Timestamptz
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  // Relations
+  order           orders    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+
+  @@index([order_id])
+  @@map("shipments")
+}
+
+// ============================================
+// REVIEWS
+// ============================================
+
+/// Product reviews (approval required)
+model reviews {
+  id              String        @id @default(uuid()) @db.Uuid
+  user_id         String        @db.Uuid
+  product_id      String        @db.Uuid
+  order_item_id   String?       @db.Uuid // Optional: link to order item
+  rating          Int           // 1-5 stars
+  content         String?       @db.Text
+  images          Json?         // Array of image URLs stored as JSON
+  status          ReviewStatus  @default(PENDING)
+  reviewed_by     String?       @db.Uuid
+  reviewed_at     DateTime?     @db.Timestamptz
+  created_at      DateTime      @default(now()) @db.Timestamptz
+  updated_at      DateTime      @updatedAt @db.Timestamptz
+
+  // Relations
+  user            users         @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  product         products      @relation(fields: [product_id], references: [id], onDelete: Restrict)
+
+  @@index([user_id])
+  @@index([product_id])
+  @@index([status])
+  @@map("reviews")
+}
+
+// ============================================
+// FINANCIAL DOMAIN
+// ============================================
+
+/// User balances
+model balances {
+  id              String    @id @default(uuid()) @db.Uuid
+  user_id         String    @unique @db.Uuid
+  balance         Decimal   @default(0) @db.Decimal(12, 2)
+  frozen_amount   Decimal   @default(0) @db.Decimal(12, 2) // Pending withdrawals
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  // Relations
+  user            users     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  transactions    balance_transactions[]
+
+  @@map("balances")
+}
+
+/// Balance transaction logs
+model balance_transactions {
+  id              String          @id @default(uuid()) @db.Uuid
+  balance_id      String          @db.Uuid
+  type            TransactionType
+  amount          Decimal         @db.Decimal(12, 2)
+  before_balance  Decimal         @db.Decimal(12, 2)
+  after_balance   Decimal         @db.Decimal(12, 2)
+  reference_type  String?         @db.VarChar(50) // "order", "withdrawal", etc.
+  reference_id    String?         @db.Uuid
+  description     String?         @db.Text
+  created_at      DateTime        @default(now()) @db.Timestamptz
+
+  // Relations
+  balance         balances        @relation(fields: [balance_id], references: [id], onDelete: Cascade)
+
+  @@index([balance_id])
+  @@index([type])
+  @@index([created_at])
+  @@map("balance_transactions")
+}
+
+/// Withdrawal requests
+model withdrawal_requests {
+  id              String            @id @default(uuid()) @db.Uuid
+  user_id         String            @db.Uuid
+  amount          Decimal           @db.Decimal(12, 2)
+  bank_name       String            @db.VarChar(100)
+  account_number  String            @db.VarChar(50)
+  account_name    String            @db.VarChar(100)
+  status          WithdrawalStatus  @default(PENDING)
+  reviewed_by     String?           @db.Uuid
+  reviewed_at     DateTime?         @db.Timestamptz
+  review_notes    String?           @db.Text
+  completed_at    DateTime?         @db.Timestamptz
+  created_at      DateTime          @default(now()) @db.Timestamptz
+
+  @@index([user_id])
+  @@index([status])
+  @@map("withdrawal_requests")
+}
+
+/// Financial records (general ledger)
+model financial_records {
+  id              String    @id @default(uuid()) @db.Uuid
+  type            String    @db.VarChar(50) // "income", "expense", "refund"
+  category        String    @db.VarChar(50) // "product_sale", "shipping_fee", etc.
+  amount          Decimal   @db.Decimal(12, 2)
+  reference_type  String?   @db.VarChar(50)
+  reference_id    String?   @db.Uuid
+  description     String?   @db.Text
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  @@index([type])
+  @@index([category])
+  @@index([created_at])
+  @@map("financial_records")
+}
+
+/// Bank accounts configuration (backend manageable)
+model bank_accounts {
+  id              String    @id @default(uuid()) @db.Uuid
+  bank_name       String    @db.VarChar(100)
+  account_number  String    @db.VarChar(50)
+  account_name    String    @db.VarChar(100)
+  is_active       Boolean   @default(true)
+  sort_order      Int       @default(0)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  @@map("bank_accounts")
+}
+
+// ============================================
+// COUPONS DOMAIN
+// ============================================
+
+/// Coupons (1 per order)
+model coupons {
+  id              String        @id @default(uuid()) @db.Uuid
+  code            String        @unique @db.VarChar(50)
+  name            String        @db.VarChar(100)
+  type            CouponType
+  value           Decimal       @db.Decimal(10, 2) // Fixed amount or percentage
+  min_purchase    Decimal       @default(0) @db.Decimal(12, 2) // Minimum purchase amount
+  max_discount    Decimal?      @db.Decimal(10, 2) // Max discount for percentage type
+  total_quantity  Int
+  used_quantity   Int           @default(0)
+  start_date      DateTime      @db.Timestamptz
+  end_date        DateTime      @db.Timestamptz
+  is_active       Boolean       @default(true)
+  created_at      DateTime      @default(now()) @db.Timestamptz
+  updated_at      DateTime      @updatedAt @db.Timestamptz
+
+  // Relations
+  user_claims     user_coupons[]
+
+  @@index([code])
+  @@index([is_active, start_date, end_date])
+  @@map("coupons")
+}
+
+/// User coupon claims
+model user_coupons {
+  id              String        @id @default(uuid()) @db.Uuid
+  user_id         String        @db.Uuid
+  coupon_id       String        @db.Uuid
+  status          CouponStatus  @default(ACTIVE)
+  used_at         DateTime?     @db.Timestamptz
+  order_id        String?       @db.Uuid
+  claimed_at      DateTime      @default(now()) @db.Timestamptz
+
+  // Relations
+  user            users         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  coupon          coupons       @relation(fields: [coupon_id], references: [id], onDelete: Restrict)
+
+  @@index([user_id])
+  @@index([coupon_id])
+  @@index([status])
+  @@map("user_coupons")
+}
+
+// ============================================
+// ADS DOMAIN
+// ============================================
+
+/// Banner ads
+model banners {
+  id              String    @id @default(uuid()) @db.Uuid
+  title           String    @db.VarChar(100)
+  image_url       String    @db.Text
+  link_url        String?   @db.Text
+  sort_order      Int       @default(0)
+  is_active       Boolean   @default(true)
+  start_date      DateTime? @db.Timestamptz
+  end_date        DateTime? @db.Timestamptz
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  @@index([is_active])
+  @@map("banners")
+}
+
+/// Popup ads
+model popups {
+  id              String    @id @default(uuid()) @db.Uuid
+  title           String    @db.VarChar(100)
+  image_url       String    @db.Text
+  link_url        String?   @db.Text
+  is_active       Boolean   @default(true)
+  start_date      DateTime? @db.Timestamptz
+  end_date        DateTime? @db.Timestamptz
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  @@index([is_active])
+  @@map("popups")
+}
+
+/// Scheduled ads
+model ad_schedules {
+  id              String    @id @default(uuid()) @db.Uuid
+  name            String    @db.VarChar(100)
+  ad_type         AdType
+  content_url     String    @db.Text
+  link_url        String?   @db.Text
+  start_time      DateTime  @db.Timestamptz
+  end_time        DateTime  @db.Timestamptz
+  is_active       Boolean   @default(true)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  @@index([ad_type])
+  @@index([is_active, start_time, end_time])
+  @@map("ad_schedules")
+}
+
+// ============================================
+// CUSTOMER SERVICE DOMAIN
+// ============================================
+
+/// Chat conversations
+model conversations {
+  id              String    @id @default(uuid()) @db.Uuid
+  user_id         String    @db.Uuid
+  product_id      String?   @db.Uuid // Optional: related product
+  status          String    @default("open") @db.VarChar(20) // open, closed
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  // Relations
+  user            users     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  messages        messages[]
+
+  @@index([user_id])
+  @@index([status])
+  @@map("conversations")
+}
+
+/// Chat messages
+model messages {
+  id              String          @id @default(uuid()) @db.Uuid
+  conversation_id String          @db.Uuid
+  sender          MessageSender
+  sender_id       String          @db.Uuid // user_id or admin_id
+  content         String          @db.Text
+  is_read         Boolean         @default(false)
+  created_at      DateTime        @default(now()) @db.Timestamptz
+
+  // Relations
+  conversation    conversations   @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+
+  @@index([conversation_id])
+  @@index([is_read])
+  @@map("messages")
+}
+
+// ============================================
+// SITE SETTINGS
+// ============================================
+
+/// Site settings (logo, text, working hours, etc.)
+model settings {
+  id              String    @id @default(uuid()) @db.Uuid
+  key             String    @unique @db.VarChar(100)
+  value           String    @db.Text
+  description     String?   @db.Text
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  @@map("settings")
+}
+
+// ============================================
+// SHIPPING METHODS
+// ============================================
+
+/// Custom shipping methods (backend manageable)
+model shipping_methods {
+  id              String    @id @default(uuid()) @db.Uuid
+  name            String    @db.VarChar(100)
+  description     String?   @db.Text
+  base_fee        Decimal   @db.Decimal(10, 2)
+  free_threshold  Decimal?  @db.Decimal(12, 2) // Free shipping above this amount
+  estimated_days  String    @db.VarChar(50) // e.g., "2-3 days"
+  is_active       Boolean   @default(true)
+  sort_order      Int       @default(0)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+
+  @@map("shipping_methods")
+}
+
+// ============================================
+// OPERATION LOGS (IMMUTABLE)
+// ============================================
+
+/// Operation logs - PERMANENT, CANNOT BE DELETED OR MODIFIED
+model operation_logs {
+  id              String          @id @default(uuid()) @db.Uuid
+  admin_id        String?         @db.Uuid
+  action          OperationAction
+  target_type     String          @db.VarChar(50) // "product", "order", "admin", etc.
+  target_id       String?         @db.Uuid
+  before_data     Json?           // JSON snapshot before change
+  after_data      Json?           // JSON snapshot after change
+  ip_address      String?         @db.VarChar(45)
+  user_agent      String?         @db.Text
+  created_at      DateTime        @default(now()) @db.Timestamptz
+
+  // Relations
+  admin           admins?         @relation(fields: [admin_id], references: [id], onDelete: SetNull)
+
+  @@index([admin_id])
+  @@index([target_type, target_id])
+  @@index([action])
+  @@index([created_at])
+  @@map("operation_logs")
+}
+
+// ============================================
+// LEGACY TABLE (P1)
+// ============================================
+
+/// Test ping table for Supabase connection verification (P1 legacy)
+model test_ping {
+  id         String   @id @default(uuid()) @db.Uuid
+  message    String   @db.Text
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  @@map("test_ping")
+}
+
+// ============================================
+// CART (P4)
+// ============================================
+
+/// Shopping cart items
+model cart_items {
+  id          String   @id @default(uuid()) @db.Uuid
+  user_id     String   @db.Uuid
+  product_id  String   @db.Uuid
+  quantity    Int      @default(1)
+  created_at  DateTime @default(now()) @db.Timestamptz
+  updated_at  DateTime @updatedAt @db.Timestamptz
+
+  @@index([user_id])
+  @@index([product_id])
+  @@map("cart_items")
+}
+
+// ============================================
+// BALANCE MANAGEMENT (P5-B)
+// ============================================
+
+/// Balance change requests (for review-based balance adjustments)
+model balance_change_requests {
+  id            String    @id @default(uuid()) @db.Uuid
+  member_id     String    @db.Uuid
+  amount        Decimal   @db.Decimal(12, 2)
+  type          String    @db.VarChar(50) // "deposit", "withdrawal", "adjustment"
+  reason        String?   @db.Text
+  status        String    @default("pending") @db.VarChar(20) // pending, approved, rejected
+  requester_id  String    @db.Uuid
+  reviewer_id   String?   @db.Uuid
+  reviewed_at   DateTime? @db.Timestamptz
+  created_at    DateTime  @default(now()) @db.Timestamptz
+
+  @@index([member_id])
+  @@index([status])
+  @@map("balance_change_requests")
+}
+
+/// Balance transaction logs (simplified)
+model balance_logs {
+  id          String    @id @default(uuid()) @db.Uuid
+  user_id     String    @db.Uuid
+  amount      Decimal   @db.Decimal(12, 2)
+  type        String    @db.VarChar(50) // "deposit", "withdrawal", "purchase", "refund", "adjustment"
+  reason      String?   @db.Text
+  operator_id String?   @db.Uuid
+  created_at  DateTime  @default(now()) @db.Timestamptz
+
+  @@index([user_id])
+  @@index([type])
+  @@map("balance_logs")
+}
+
+// ============================================
+// ORDER STATUS HISTORY (P5-B)
+// ============================================
+
+/// Order status change history
+model order_status_history {
+  id          String   @id @default(uuid()) @db.Uuid
+  order_id    String   @db.Uuid
+  old_status  String?  @db.VarChar(30)
+  new_status  String   @db.VarChar(30)
+  changed_by  String?  @db.Uuid
+  reason      String?  @db.Text
+  created_at  DateTime @default(now()) @db.Timestamptz
+
+  @@index([order_id])
+  @@map("order_status_history")
+}

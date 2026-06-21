@@ -1,0 +1,271 @@
+P5-B 跑通但验收不通过(5 路由 + 5 页面 + 628 三语 keys + tsc 0 error + next build PASS 31 路由),P5-Check 找到 3 个 🔴 高 + 1 个约束违反。请**只修这 4 项**,其他不要动。
+
+⚠️ 重要约束(必读):
+==========================================
+沙箱网络隔离,**绝对不要启动后端服务 / 不要启动前端服务 / 不要 curl / 不要 prisma migrate**
+P5-Fix 只做"修代码 + 静态检查",不验证运行时。
+==========================================
+
+==========================================
+完整需求文档(必读):
+==========================================
+ final_requirements_for_coze.md
+ development_spec.md
+
+==========================================
+P5-Fix 修复范围(只修这 4 项,其他不动):
+==========================================
+
+## 🔴 高 #1: 5 个后台路由缺 `requirePermission` 中间件
+
+**严重度**:🔴 高
+**当前问题**: 5 个后台路由文件只有 `authenticateToken` 验证登录,没用 `requirePermission` 做细粒度权限控制,任何登录管理员都能执行所有写操作。
+
+**修复**(在每个写路由上加 requirePermission):
+
+### a. backend/src/routes/admin-orders.ts
+```typescript
+// POST /:id/review-proof — 审核凭证
+router.post('/:id/review-proof', requirePermission('orders', 'can_edit'), async (req, res) => { ... })
+
+// POST /:id/ship — 发货(P4-A AI 主动补的)
+router.post('/:id/ship', requirePermission('orders', 'can_edit'), async (req, res) => { ... })
+
+// POST /:id/cancel — 取消订单(超管专属)
+router.post('/:id/cancel', requirePermission('orders', 'can_delete'), async (req, res) => { ... })
+```
+
+### b. backend/src/routes/admin-balance.ts
+```typescript
+// POST /requests — 申请余额变更
+router.post('/requests', requirePermission('balance', 'can_create'), async (req, res) => { ... })
+
+// POST /requests/:id/approve — 审核通过
+router.post('/requests/:id/approve', requirePermission('balance', 'can_edit'), async (req, res) => { ... })
+
+// POST /requests/:id/reject — 审核拒绝
+router.post('/requests/:id/reject', requirePermission('balance', 'can_edit'), async (req, res) => { ... })
+
+// POST /members/:id/balance/direct — 直改余额(只 super_admin / finance_super_admin)
+router.post('/members/:id/balance/direct', requirePermission('balance', 'can_delete'), async (req, res) => { ... })
+```
+
+### c. backend/src/routes/admin-members.ts
+```typescript
+// PATCH /:id/status — 启用/禁用
+router.patch('/:id/status', requirePermission('members', 'can_edit'), async (req, res) => { ... })
+```
+
+### d. backend/src/routes/admin-payment-proofs.ts
+```typescript
+// POST /:id/approve — 同意凭证
+router.post('/:id/approve', requirePermission('orders', 'can_edit'), async (req, res) => { ... })
+
+// POST /:id/reject — 拒绝凭证
+router.post('/:id/reject', requirePermission('orders', 'can_edit'), async (req, res) => { ... })
+```
+
+### e. backend/src/routes/admin-reviews.ts
+```typescript
+// PATCH /:id/status — 显示/隐藏
+router.patch('/:id/status', requirePermission('products', 'can_edit'), async (req, res) => { ... })
+```
+
+**权限位引用**:
+- 订单 / 凭证: `orders.can_edit` (order_manager + super_admin)
+- 取消订单: `orders.can_delete` (只 super_admin)
+- 会员启用/禁用: `members.can_edit` (customer_service + super_admin)
+- 评价显示/隐藏: `products.can_edit` (product_manager + super_admin)
+- 余额申请: `balance.can_create` (order_manager + customer_service)
+- 余额审核: `balance.can_edit` (super_admin + finance_super_admin)
+- 余额直改: `balance.can_delete` (只 super_admin + finance_super_admin)
+
+**验证方法**: `grep -c "requirePermission" backend/src/routes/admin-*.ts` 全部 > 0
+
+## 🔴 高 #2: 订单创建没扣库存,可能超卖
+
+**严重度**:🔴 高
+**当前问题**: `backend/src/routes/orders.ts:164-170` 创建订单时只查商品价格,没扣 `products.stock` 字段。products.ts:201 可见 stock 字段已存在。
+**影响**: 多个用户同时下单,库存可能变负;商品售罄后仍可被购买。
+
+**修复方案**(在创建订单的事务中):
+
+### a. orders.ts POST / — 加事务扣库存
+```typescript
+// 在创建订单的事务中(prisma.$transaction)
+await prisma.$transaction(async (tx) => {
+  // 1. 逐商品扣库存(原子条件更新,防止超卖)
+  for (const item of cartItems) {
+    const updated = await tx.product.updateMany({
+      where: {
+        id: item.product_id,
+        stock: { gte: item.quantity },  // 库存够才扣
+        status: 'active',
+        deleted_at: null,
+      },
+      data: {
+        stock: { decrement: item.quantity },
+      },
+    })
+    if (updated.count === 0) {
+      throw new Error(`Product ${item.product_id} out of stock`)
+    }
+  }
+
+  // 2. 创建订单
+  const order = await tx.order.create({ data: { ... } })
+
+  // 3. 创建订单项
+  await tx.orderItem.createMany({ data: items })
+
+  return order
+})
+```
+
+### b. orders.ts POST /:id/cancel — 取消订单时回退库存
+```typescript
+await prisma.$transaction(async (tx) => {
+  const order = await tx.order.findUnique({
+    where: { id: orderId },
+    include: { items: true },
+  })
+
+  // 只有 pending_payment / rejected 可取消
+  if (!['pending_payment', 'rejected'].includes(order.status)) {
+    throw new Error('Order cannot be cancelled in current status')
+  }
+
+  // 更新订单状态
+  await tx.order.update({
+    where: { id: orderId },
+    data: { status: 'cancelled' },
+  })
+
+  // 回退库存
+  for (const item of order.items) {
+    await tx.product.update({
+      where: { id: item.product_id },
+      data: { stock: { increment: item.quantity } },
+    })
+  }
+})
+```
+
+### c. admin-orders.ts POST /:id/cancel — 后台取消也要回退库存
+- 复用上面 b 的逻辑
+- 写一个共享函数 `cancelOrder(orderId, tx)` 在 `lib/order.ts` 或 `services/order.ts`
+
+**验证方法**: 
+- `grep -n "stock.*decrement" backend/src/routes/orders.ts` 应有
+- `grep -n "stock.*increment" backend/src/routes/orders.ts` 应有
+- 创建订单测试:库存够 → 订单成功,stock 减;库存不够 → 订单失败,stock 不变
+
+## 🔴 高 #3: admin-reviews.ts:296 物理删除评价
+
+**严重度**:🔴 高
+**当前问题**: `backend/src/routes/admin-reviews.ts:296` 用了 `DELETE FROM reviews` 物理删除,违反"评价**只能隐藏不能删除**"硬性要求(继承自操作日志不可删原则)。
+**影响**: 评价数据永久丢失,无法恢复,审计不完整。
+
+**修复方案**:
+
+### a. backend/src/routes/admin-reviews.ts — 删除 DELETE 路由
+- 整段删除 DELETE /:id 路由
+- PATCH /:id/status 路由(显示/隐藏)保留并加 requirePermission(见 🔴 高 #1.e)
+
+### b. 前端 /src/app/admin/reviews/page.tsx — 改 UI
+- 操作列**只显示"显示"或"隐藏"按钮**(根据当前 status)
+- **删除"删除"按钮**(P5-B 报告里 AI 自己列了"通过/驳回/删除"中的"删除" — 要去掉)
+- 改成"显示"/"隐藏"两个互斥按钮
+
+### c. 前端 useAdminAuth — 权限检查
+- "显示/隐藏"按钮要用 hasPermission('products', 'can_edit') 检查
+- 没权限的角色看到按钮置灰或隐藏
+
+**验证方法**: 
+- `grep "DELETE FROM reviews" backend/src/routes/admin-reviews.ts` 应返回 0
+- 前端 grep "删除" 关键字,评价页 0 处(订单等其他页允许)
+
+## ⚠️ 约束违反: P5-B 侧边栏新增"支付凭证""余额管理" 2 个菜单
+
+**严重度**: ⚠️(P5-B 任务约束违反)
+**当前问题**: P5-B 报告说"侧边栏新增支付凭证和余额管理菜单",P5-A 6 占位页 11 菜单变 13,违反 P5-B 任务原话"❌ 不要删除任何 P5-A 6 个占位页菜单(Sidebar 11 菜单不变)"。
+**影响**: 菜单结构变化,可能影响管理员习惯。
+
+**修复方案**: 
+- **删掉 2 个新增菜单**: "支付凭证"、"余额管理"
+- **功能内聚到现有菜单**:
+  - 凭证审核 → 已经是 /admin/orders 详情页的子操作(同意/拒绝按钮) → **不需要独立菜单**
+  - 余额审核 → 内聚到 /admin/members 详情页"余额操作"区(已经在 P5-B 实现了)→ **不需要独立菜单**
+- 侧边栏恢复 11 菜单:
+  - 仪表盘 / 商品 / 分类 / 物流 / 站点设置(P5-A 完整)
+  - 订单 / 评价 / 会员 / 营销 / 财务 / 客服(P5-B 实装 + P5-C 占位)
+
+**验证方法**:
+- 前端 grep "支付凭证" 应只在订单详情页出现(不是菜单)
+- 前端 grep "余额管理" 应只在会员详情页出现(不是菜单)
+- Sidebar 菜单数 = 11
+
+==========================================
+P5-Fix 严禁(这些不能做):
+==========================================
+
+❌ 不要启动后端/前端服务
+❌ 不要 curl / fetch
+❌ 不要 prisma migrate
+❌ 不要修改 P5-A 之前(P1-P5-A)的代码
+❌ 不要重构 P5-B 已经正确的代码
+❌ 不要修 🟡 中(4-6)和 🟢 低(7-8)问题 — 等 P6/P7
+❌ 不要新加功能
+❌ 不要改 P5-A 验证清单里其他已 PASS 的项
+
+==========================================
+P5-Fix 完成后报告格式(必须严格遵守):
+==========================================
+
+按以下格式输出:
+
+```
+## P5-Fix 修复报告
+
+### 修复清单
+
+| # | 严重度 | 描述 | 状态 | 验证 |
+|---|--------|------|------|------|
+| 1 | 🔴 高 | 5 路由加 requirePermission | ✅ | grep 验证 X 处 |
+| 2 | 🔴 高 | 订单扣库存 + 取消回退 | ✅ | grep 验证 X 处 |
+| 3 | 🔴 高 | 删除 DELETE 物理删除路由 | ✅ | grep 验证 0 处 |
+| 4 | ⚠️ | Sidebar 恢复 11 菜单 | ✅ | grep 验证 |
+
+### 验证结果
+
+| 检查项 | 结果 |
+|--------|------|
+| TypeScript `tsc --noEmit` (后端) | ✅ PASS / ❌ FAIL |
+| TypeScript `tsc --noEmit` (前端) | ✅ PASS / ❌ FAIL |
+| Next.js `next build` | ✅ PASS / ⚠️ TIMEOUT |
+| requirePermission 总数(新增) | X 处 |
+| 物理 DELETE 路由数 | 0(后端) |
+| Sidebar 菜单数 | 11 |
+
+### 修改的文件清单
+- backend/src/routes/admin-orders.ts
+- backend/src/routes/admin-balance.ts
+- backend/src/routes/admin-members.ts
+- backend/src/routes/admin-payment-proofs.ts
+- backend/src/routes/admin-reviews.ts
+- backend/src/routes/orders.ts
+- /src/app/admin/reviews/page.tsx
+- /src/app/admin/layout.tsx(Sidebar 调整)
+
+### 总耗时
+[时间]
+```
+
+==========================================
+关键提示:
+==========================================
+
+- 这是 P5-B 收尾修复,不是 P5-C,不要做营销/财务/客服
+- 修完后等老板验收
+- 验收通过后,按原计划开 P5-C(营销 + 财务 + 客服)
+- 财务超管(finance_super_admin)seed 状态:如本轮发现 P2 seed finance 账号角色不是 finance_super_admin,在报告"待 P7 部署时调整"清单里列出

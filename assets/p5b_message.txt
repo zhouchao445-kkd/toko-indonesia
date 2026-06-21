@@ -1,0 +1,203 @@
+P5-A 后台基础 + 商品/分类/物流/站点设置验收通过(5 路由 + 权限中间件 + adminApi/adminStorage/useAdminAuth/AdminAuthGuard + 12 页面,tsc 0 error,next build 4.3s 29 路由,371 三语 keys,logOperation 25 处,requirePermission 15 处,触摸热区 159 处),请开始 P5-B 后台订单 + 凭证审核 + 评价 + 会员 + 余额 + 发货 阶段(API + UI)。
+
+⚠️ 重要约束(必读):
+==========================================
+沙箱网络隔离,**绝对不要启动后端服务 / 不要启动前端服务 / 不要 curl / 不要 prisma migrate**
+P3 上次失败就是因为这个。P5-B 只做"创建文件 + 静态检查",不验证运行时。
+==========================================
+
+==========================================
+完整需求文档(必读):
+==========================================
+ final_requirements_for_coze.md
+(本文件包含全部 0.2 终极定稿 + 4 风险方案 + 13 细节 + 完整 P1-P7 阶段规划)
+
+==========================================
+P1/P2/P3-A/P3-B/P4-A/P4-B/P5-A 已确认的架构(不要改):
+==========================================
+- 后端: Express 5 + Prisma + JWT(已有后台模块: admin/auth + admin-upload + admin-categories + admin-products + admin-shipping-methods + admin-settings + admin-orders(P4-A 已有 4 路由:list/detail/review-proof/ship))
+- 前端: Next.js 16 + React 19 + Tailwind 4 + shadcn/ui + next-intl
+- 数据库: Supabase Postgres(31 张表)
+- 三语: id(默认)/ zh / en
+- 端口: 前端 5000 / 后端 9000
+- 现有后台前端基建: adminApi / adminStorage / useAdminAuth(hasPermission)/ AdminAuthGuard
+- 现有后台前端页面: /admin/login + /admin(仪表盘)+ /admin/products(列表+编辑)+ /admin/categories + /admin/shipping-methods + /admin/settings + 6 占位页(orders/reviews/members/marketing/finance/support) — **占位页要全部实装**
+- 已有 5 角色: super_admin / finance_super_admin / product_manager / order_manager / customer_service / marketing_manager
+- 已有权限位: 7 模块 × 4 操作(52 位),P5-A 已用 categories/products/shipping/settings 权限位
+- 订单 7 状态: pending_payment / pending_review / approved / shipped / completed / rejected / cancelled
+- 财务超管(本轮新增): finance_super_admin 角色,直改余额不走审核
+
+==========================================
+P5-B 范围(后台管理 - 订单 + 凭证审核 + 评价 + 会员 + 余额 + 发货):
+==========================================
+
+## 1. 后端 API 扩展(写到 backend/src/routes/)
+
+### a. admin-orders.ts(扩展,P4-A 已有 review-proof + ship,补全列表/详情/取消)
+- GET /api/admin/orders — 列表(支持筛选:状态/时间范围/会员ID/订单号搜索/分页)
+- GET /api/admin/orders/:id — 详情(含会员/地址/商品/凭证/物流完整信息)
+- POST /api/admin/orders/:id/cancel — 超管取消(approved 前可取消,取消时恢复库存)
+- 已有 review-proof 和 ship 保留
+- 全部走 logOperation
+- 权限:order_manager / super_admin 可写(取消/审核/发货),customer_service 只读,finance_manager 只读(看财务相关)
+
+### b. admin-payment-proofs.ts(新,凭证审核独立列表)
+- GET /api/admin/payment-proofs — 待审列表(status=pending)+ 全部列表(status 筛选)
+- GET /api/admin/payment-proofs/:id — 凭证详情(含图片 URL)
+- POST /api/admin/payment-proofs/:id/approve — 同意(订单 → approved)
+- POST /api/admin/payment-proofs/:id/reject — 拒绝(订单 → rejected + 拒绝原因)
+- 全部走 logOperation
+- 权限:order_manager / super_admin
+
+### c. admin-reviews.ts(新,评价审核)
+- GET /api/admin/reviews — 列表(全部 + 状态筛选:pending/visible/hidden)
+- GET /api/admin/reviews/:id — 评价详情
+- PATCH /api/admin/reviews/:id/status — 改状态(visible/hidden,**没有删除**)
+- 全部走 logOperation
+- **先审后公**规则:商品详情页只显示 status='visible' 的评价(P3-B 商品详情页要对应改查询)
+- 权限:product_manager / super_admin 可写,全部角色可读
+
+### d. admin-members.ts(新,会员管理)
+- GET /api/admin/members — 列表(支持筛选:注册时间/状态 enabled/disabled/余额范围/分页)
+- GET /api/admin/members/:id — 详情(基本信息 + 地址列表 + 订单历史 + 余额流水)
+- PATCH /api/admin/members/:id/status — 启用/禁用(disabled 后无法登录)
+- 全部走 logOperation
+- 权限:customer_service / super_admin 可写(只禁用/启用,不删)
+
+### e. admin-balance.ts(新,余额管理 — 关键)
+- 余额变更类型分两种:
+  1. **直接修改**(super_admin / finance_super_admin 专属,不走审核) — 调账、退款、补偿
+  2. **审核流程**(order_manager 申请,finance_super_admin / super_admin 审核) — 充值、其他
+- 建议表设计:`balance_change_requests` 表(id / member_id / amount / type / reason / status / requester_id / reviewer_id / created_at / reviewed_at)
+  - type: 'direct' (直改) | 'review' (审核)
+  - status: 'pending' | 'approved' | 'rejected'
+- API:
+  - GET /api/admin/balance-requests — 待审列表(只 status=pending)
+  - GET /api/admin/balance-requests/:id — 详情
+  - POST /api/admin/balance-requests — 申请变更(member_id / amount / reason)
+  - POST /api/admin/balance-requests/:id/approve — 审核通过(直改余额 + 写余额流水)
+  - POST /api/admin/balance-requests/:id/reject — 审核拒绝
+  - POST /api/admin/members/:id/balance/direct — **直改余额**(只 super_admin / finance_super_admin,不走审核)
+- 全部走 logOperation
+- 权限矩阵:
+  - direct 直改: super_admin / finance_super_admin
+  - 申请变更: order_manager
+  - 审核: super_admin / finance_super_admin
+  - 查看: 全部后台角色
+
+## 2. 后台前端页面(写到 /src/app/admin/)
+
+### a. /admin/orders/page.tsx(订单列表 — 替换占位)
+- 筛选:状态(7 状态)+ 时间范围(今日/本周/本月/全部) + 会员搜索 + 订单号搜索
+- 表格:订单号/会员/金额/状态(StatusBadge)/ 创建时间/ 操作(查看)
+- 分页
+- 权限:全部后台角色可看
+
+### b. /admin/orders/[id]/page.tsx(订单详情 — 替换占位)
+- 订单基本信息(订单号/创建时间/状态/金额)
+- 会员信息(姓名/电话/邮箱)
+- 收货地址
+- 商品清单(图/名/数量/单价/小计)
+- 支付凭证预览(如有,img 标签显示,点击放大)
+- 物流信息(发货前显示"待发货",发货后显示物流方式+运单号)
+- 操作区(按订单状态显示):
+  - pending_review: [同意] [拒绝(弹窗填原因)]
+  - approved: [发货(弹窗选物流方式+填运单号)]
+  - 其他状态:无操作
+  - **超管专属**:pending_payment / pending_review 状态可 [取消订单]
+- 全部走 useAdminAuth + hasPermission
+
+### c. /admin/payment-proofs/page.tsx(凭证审核列表 — 新)
+- 默认筛选 status=pending(待审)
+- 表格:凭证图缩略图/订单号/金额/会员/上传时间/ 操作(查看/同意/拒绝)
+- 点击操作直接调 API(同意/拒绝),拒绝时弹窗填原因
+- 切换 tab: 待审 / 全部
+
+### d. /admin/reviews/page.tsx(评价审核 — 替换占位)
+- 筛选:状态(pending/visible/hidden)
+- 表格:商品图/商品名/会员/评分/内容摘要/状态/创建时间/ 操作(显示/隐藏)
+- 详情抽屉(点行展开):评价完整内容 + 商品链接 + 评价图片
+
+### e. /admin/members/page.tsx(会员列表 — 替换占位)
+- 筛选:注册时间/状态(enabled/disabled)/ 余额范围
+- 表格:头像/姓名/电话/注册时间/余额/状态/ 操作(查看/禁用/启用)
+- 分页
+
+### f. /admin/members/[id]/page.tsx(会员详情 — 替换占位)
+- 基本信息(姓名/电话/邮箱/注册时间/状态)
+- 操作区:[禁用] / [启用] 按钮(按当前状态显示)
+- 余额显示 + 余额流水(最近 20 条)
+- **余额操作区**:
+  - 普通角色(只有查看权限):显示余额
+  - super_admin / finance_super_admin:[直改余额] 按钮(弹窗:金额 +/-/ 原因)
+  - order_manager / customer_service:[申请变更] 按钮(弹窗:金额/原因/提交审核)
+- 地址列表
+- 订单历史(最近 10 条)
+- 余额审核请求记录(最近 10 条)
+
+### g. /admin/balance-requests/page.tsx(余额审核 — 新)
+- 默认筛选 status=pending
+- 表格:会员/金额/类型/申请人/申请时间/ 原因/ 操作(同意/拒绝)
+- 全部后台角色可看(只 super_admin / finance_super_admin 可操作)
+
+## 3. 三语翻译(写到 messages/id.json / zh.json / en.json)
+
+- orders(列表/详情/操作/状态)
+- payment-proofs(审核列表/同意/拒绝弹窗)
+- reviews(评价审核/状态)
+- members(列表/详情/禁用/启用/直改余额/申请变更)
+- balance(余额/审核/流水/类型)
+- common(确认/取消/弹窗通用)
+
+## 4. 权限矩阵(本轮新增权限位)
+
+| 模块 | product_manager | order_manager | customer_service | finance_super_admin | super_admin |
+|------|----------------|---------------|------------------|---------------------|-------------|
+| 订单查看 | ✅ 只读 | ✅ 全部 | ✅ 只读 | ✅ 只读 | ✅ 全部 |
+| 订单审核/发货/取消 | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 凭证审核 | ❌ | ✅ | ❌ | ❌ | ✅ |
+| 评价查看 | ✅ 只读 | ✅ 只读 | ✅ 只读 | ✅ 只读 | ✅ 全部 |
+| 评价审核(显示/隐藏) | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 会员查看 | ✅ 只读 | ✅ 只读 | ✅ 全部 | ✅ 只读 | ✅ 全部 |
+| 会员禁用/启用 | ❌ | ❌ | ✅ | ❌ | ✅ |
+| 余额查看 | ✅ 只读 | ✅ 只读 | ✅ 只读 | ✅ 全部 | ✅ 全部 |
+| 余额申请变更 | ❌ | ✅ | ✅ | ❌ | ✅ |
+| 余额审核 | ❌ | ❌ | ❌ | ✅ | ✅ |
+| 余额直改 | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+## 5. 验证清单(必须全 PASS)
+
+| 检查项 | 目标 |
+|--------|------|
+| TypeScript `tsc --noEmit` | 0 errors |
+| Next.js `next build` | PASS,生成所有 admin 路由 |
+| 新增路由数 | 7 个新文件(其中 admin-orders 扩展) |
+| 替换占位页数 | 4 个(orders/reviews/members x2) |
+| 新页面数 | 3 个(payment-proofs/balance-requests + 替换占位) |
+| 三语翻译 key 总数 | 目标 450+ keys |
+| logOperation 调用 | 目标 15+ 处(本轮新加) |
+| requirePermission 使用 | 目标 12+ 处 |
+| AdminAuthGuard 包裹 | 全部 7 个本轮新/替换页面 |
+| useAdminAuth(hasPermission) | 关键操作按钮 100% 鉴权 |
+| 触摸热区 min-h-[44px] | 80+ 处 |
+| 响应式断点 | 30+ 处 |
+
+## 6. 严格禁止
+
+- ❌ 不要启动后端/前端服务
+- ❌ 不要 curl / fetch
+- ❌ 不要 prisma migrate / prisma generate
+- ❌ 不要修改 P5-A 已完成的代码(只扩展/新增)
+- ❌ 不要修改 P1-P4 已有路由(只新增/扩展 admin-orders)
+- ❌ 不要删除任何 P5-A 6 个占位页菜单(Sidebar 11 菜单不变)
+- ❌ 不要改数据库 schema(如需新表,先在 Prisma schema 加 model,本轮不做 migrate)
+
+## 7. 关键提示
+
+- 财务超管(finance_super_admin)角色继承自 P2,**本轮首次使用**,要确保 P2 seed 的 5 个默认账号中,finance 账号的角色是 finance_super_admin(检查 P2 的 seed 数据,如未对应,在最终交付报告里列出"待 P7 部署时调整")
+- **直改余额必须双重确认**:弹窗 + 输入"CONFIRM" 字符串才执行
+- **凭证审核拒绝原因必填**:弹窗拒绝时必须填原因(空 → 提交按钮 disabled)
+- **发货弹窗必填**:物流方式(下拉从 P5-A shipping_methods 拉)+ 运单号(非空)
+- 评价**只能隐藏不能删除**(继承自操作日志不可删原则)
+
+等老板验收,通过后发 P5-C(营销 + 财务 + 客服)。

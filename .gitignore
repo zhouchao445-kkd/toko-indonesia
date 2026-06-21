@@ -1,0 +1,61 @@
+# Dependencies
+node_modules
+.pnp*
+.npm
+
+# Build outputs
+dist
+.next
+.nuxt
+.turbo
+.vercel
+.parcel-cache
+.cache
+coverage
+storybook-static
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# OS files
+.DS_Store
+*.swp
+
+# IDE
+.idea
+.vscode
+*.code-workspace
+
+# Logs
+logs
+*.log
+
+# Testing
+coverage
+
+# Coze workspace
+.cozeproj/
+.coze/
+.preview
+
+# User uploads
+backend/uploads/
+realtime/uploads/
+
+# Local databases
+*.sqlite
+*.db
+prisma/dev.db
+
+# Misc
+__pycache__/
+*.pyc
+.venv/*
+*.o
+*.a
+/vendor
+*.egg-info/
+.cozeproj/reduction

@@ -1,0 +1,277 @@
+P5-B + P5-Fix 验收通过(5 路由 + 5 页面 + 12 requirePermission + 3 库存扣减 + 0 物理删除 + 11 菜单,tsc 0 error,next build 3.4s 31 路由,628 三语 keys),请开始 P5-C 营销 + 财务 + 客服 阶段(API + UI)。
+
+⚠️ 重要约束(必读):
+==========================================
+沙箱网络隔离,**绝对不要启动后端服务 / 不要启动前端服务 / 不要 curl / 不要 prisma migrate**
+P5-C 只做"创建文件 + 静态检查",不验证运行时。
+==========================================
+
+==========================================
+完整需求文档(必读):
+==========================================
+ final_requirements_for_coze.md
+ development_spec.md
+(本文件包含全部 0.2 终极定稿 + 4 风险方案 + 13 细节 + 完整 P1-P7 阶段规划 + 详细架构)
+
+==========================================
+P1-P5-B+P5-Fix 已确认的架构(不要改):
+==========================================
+- 后端: Express 5 + Prisma + JWT(已有 14 后台路由模块: admin / auth / admin-categories / admin-products / admin-shipping-methods / admin-settings / admin-upload / admin-orders / admin-payment-proofs / admin-reviews / admin-members / admin-balance + 8 公开)
+- 前端: Next.js 16 + React 19 + Tailwind 4 + shadcn/ui + next-intl
+- 数据库: Supabase Postgres(31 张表,已加 balance_change_requests)
+- 三语: id(默认)/ zh / en
+- 端口: 前端 5000 / 后端 9000
+- 现有后台前端基建: adminApi / adminStorage / useAdminAuth(hasPermission)/ AdminAuthGuard
+- 现有后台前端页面: 11 菜单 + 8 实装页(仪表盘/login/products/categories/shipping/settings/orders/reviews/members)
+- 已有 5 角色: super_admin / finance_super_admin / product_manager / order_manager / customer_service / marketing_manager
+- 已有权限位: 7 模块 × 4 操作(52 位),已用:products / categories / shipping / settings / orders / members / balance
+- **客服风险 4 方案 A 锁定**: 消息入库 + 30s 心跳 + 自动重连 + 5s 轮询 fallback(无 WebSocket 强依赖)
+- **零外部依赖**(继承): 不接 WhatsApp/邮件/短信/推送
+- **评价显示/隐藏 P5-Fix 已修**: PATCH /api/admin/reviews/:id/status,前端无删除按钮
+
+==========================================
+P5-C 范围(营销 + 财务 + 客服):
+==========================================
+
+## 1. 后端 API(写到 backend/src/routes/)
+
+### a. 营销模块
+
+#### a1. backend/src/routes/admin-coupons.ts(新)
+- GET /api/admin/coupons — 列表(支持筛选:状态/类型/时间范围/分页)
+- GET /api/admin/coupons/:id — 详情
+- POST /api/admin/coupons — 新建 { code, type(percentage/fixed), value, min_order_amount, max_discount, usage_limit, used_count, valid_from, valid_until, status }
+- PUT /api/admin/coupons/:id — 修改
+- DELETE /api/admin/coupons/:id — 软删(status='inactive')
+- GET /api/admin/coupons/:id/stats — 使用统计(已用次数 / 总金额)
+- 全部走 logOperation
+- 权限:marketing_manager / super_admin 可写,全部角色可读
+
+#### a2. backend/src/routes/admin-banners.ts(新,后台 CRUD,公开路由 banners.ts 保留只读)
+- GET /api/admin/banners — 列表
+- GET /api/admin/banners/:id — 详情
+- POST /api/admin/banners — 新建 { image_url, link_url, sort_order, status, valid_from, valid_until }
+- PUT /api/admin/banners/:id — 修改
+- DELETE /api/admin/banners/:id — 软删
+- 全部走 logOperation
+- 权限:marketing_manager / super_admin
+
+#### a3. backend/src/routes/admin-popups.ts(新,后台 CRUD)
+- GET /api/admin/popups — 列表
+- GET /api/admin/popups/:id — 详情
+- POST /api/admin/popups — 新建 { image_url, link_url, frequency(daily/once/always), status, valid_from, valid_until }
+- PUT /api/admin/popups/:id — 修改
+- DELETE /api/admin/popups/:id — 软删
+- 全部走 logOperation
+- 权限:marketing_manager / super_admin
+
+#### a4. backend/src/routes/admin-ad-schedules.ts(新,广告排期)
+- GET /api/admin/ad-schedules — 列表
+- POST /api/admin/ad-schedules — 新建排期 { banner_id, popup_id, start_time, end_time, target_pages([home, products, product_detail]), status }
+- PUT /api/admin/ad-schedules/:id — 修改
+- DELETE /api/admin/ad-schedules/:id — 软删
+- 全部走 logOperation
+- 权限:marketing_manager / super_admin
+
+### b. 财务模块
+
+#### b1. backend/src/routes/admin-withdrawals.ts(新,提现申请审核)
+- GET /api/admin/withdrawals — 列表(筛选:状态/时间/会员/分页)
+- GET /api/admin/withdrawals/:id — 详情
+- POST /api/admin/withdrawals/:id/approve — 审核通过
+- POST /api/admin/withdrawals/:id/reject — 审核拒绝(弹窗填原因)
+- 全部走 logOperation
+- 权限:finance_super_admin / super_admin 审核,order_manager / customer_service 可看
+- 1.0 提现是简化版:会员申请 → 后台审核 → 标记已转账(不接真实银行 API,只人工标记)
+
+#### b2. backend/src/routes/admin-financial-records.ts(新,财务流水)
+- GET /api/admin/financial-records — 列表(支持筛选:类型/时间/会员/金额范围/分页)
+- GET /api/admin/financial-records/export — 导出 Excel(简化版:返回 CSV 格式,前端生成 .xlsx)
+- 类型:type(income=订单收入 / refund=退款 / withdrawal=提现 / adjustment=人工调账 / commission=分销佣金 1.0 不上)
+- 1.0 只显示 income / refund / withdrawal / adjustment
+- 权限:finance_super_admin / super_admin 看全部,其他角色看自己负责的
+- 注意:**不修改不删除**,只读
+
+#### b3. backend/src/routes/admin-bank-accounts.ts(新,银行账户管理)
+- GET /api/admin/bank-accounts — 列表(P2 已有 3 银行:BCA / Mandiri / BNI seed)
+- POST /api/admin/bank-accounts — 新建 { bank_name, account_number, account_holder, branch, logo_url, status }
+- PUT /api/admin/bank-accounts/:id — 修改
+- DELETE /api/admin/bank-accounts/:id — 软删
+- 全部走 logOperation
+- 权限:**只 super_admin**(银行账户是收款核心,只超管可改)
+
+### c. 客服模块(零 WebSocket 强依赖,方案 A)
+
+#### c1. backend/src/routes/admin-conversations.ts(新,客服对话)
+- GET /api/admin/conversations — 列表(筛选:状态/分配客服/时间/分页)
+- GET /api/admin/conversations/:id — 详情(含消息列表)
+- POST /api/admin/conversations/:id/assign — 分配客服 { customer_service_id }
+- POST /api/admin/conversations/:id/close — 关闭对话
+- POST /api/admin/conversations/:id/reopen — 重开对话
+- 全部走 logOperation
+- 权限:customer_service / super_admin
+
+#### c2. backend/src/routes/admin-messages.ts(新,客服消息 + 轮询 fallback)
+- GET /api/admin/conversations/:id/messages — 拉取消息(支持 since=<timestamp> 增量拉取)
+- POST /api/admin/conversations/:id/messages — 发送消息 { content, type(text/image) }
+- 全部走 logOperation
+- 权限:customer_service / super_admin
+
+#### c3. backend/src/lib/chat-polling.ts(新,前端 5s 轮询工具)
+- export function useChatPolling(conversationId, onMessage)
+- 5s 轮询拉取新消息(用 since=<last_timestamp>)
+- 30s 心跳(记录最后在线时间)
+- 自动重连:网络断开 3 次后 → 退避到 10s,恢复后回 5s
+- 不是 WebSocket 客户端,只是基于 fetch 的轮询 hook
+
+#### c4. backend/src/lib/heartbeat.ts(新,前后端心跳)
+- 后端: GET /api/admin/heartbeat — 返回 { server_time, status: 'ok' }
+- 前端 30s 调一次,用于检测后端是否在线
+- 失败 3 次 → UI 提示"连接中断,正在重试"
+
+## 2. 前端页面(写到 /src/app/admin/)
+
+### a. /admin/marketing/page.tsx(营销首页 — 替换占位)
+- 4 个快捷入口卡片:优惠券 / 横幅 / 弹窗 / 广告排期
+- 最近 7 天优惠券使用统计(图标 + 数字)
+
+### b. /admin/marketing/coupons/page.tsx(优惠券管理)
+- 列表:code / 类型(百分比/固定)/ 折扣值 / 使用次数 / 有效时间 / 状态
+- 操作:新建 / 编辑 / 软删 / 查看使用统计
+- 弹窗表单(code 自动生成 or 手动 + 校验唯一)
+
+### c. /admin/marketing/banners/page.tsx(横幅管理)
+- 列表:图片预览(用主图 URL 缩略图)/ 链接 / 排序 / 状态 / 有效时间
+- 操作:新建 / 编辑 / 软删 / 启用-禁用切换
+- 支持 P5-A admin-upload 上传图片
+
+### d. /admin/marketing/popups/page.tsx(弹窗管理)
+- 列表 + CRUD + 频率设置
+- 弹窗预览(点击行右侧"预览"按钮)
+
+### e. /admin/marketing/ad-schedules/page.tsx(广告排期)
+- 列表:排期名 / 关联 banner 或 popup / 时间段 / 目标页面 / 状态
+- 操作:新建 / 编辑 / 软删
+
+### f. /admin/finance/page.tsx(财务首页 — 替换占位)
+- 4 个快捷入口:提现审核 / 财务流水 / 银行账户 / (P5-B 余额审核入口)
+- 财务概览:今日收入 / 本月收入 / 待审核提现数
+
+### g. /admin/finance/withdrawals/page.tsx(提现审核)
+- 列表:会员 / 金额 / 银行账户 / 申请时间 / 状态
+- 操作:查看详情(弹窗显示会员信息 + 历史提现)/ 同意 / 拒绝(弹窗填原因)
+- 默认筛选 status=pending
+
+### h. /admin/finance/financial-records/page.tsx(财务流水)
+- 列表:时间 / 会员 / 类型 / 金额 / 关联订单
+- 筛选:类型/时间/会员/金额范围
+- 导出按钮(导出 CSV/Excel)
+- 表格要虚拟滚动(可能上千行)
+
+### i. /admin/finance/bank-accounts/page.tsx(银行账户管理)
+- 列表:银行 logo / 银行名 / 账号 / 持有人 / 分行 / 状态
+- 操作:新建 / 编辑 / 软删
+- **只 super_admin 可见 / 可操作**
+
+### j. /admin/support/page.tsx(客服 — 替换占位)
+- **双栏布局**:左侧对话列表 / 右侧消息窗口
+- 左侧:状态(待处理/进行中/已关闭)/ 分配客服 / 会员 / 最后消息时间
+- 右侧:消息流(气泡布局)/ 输入框(文字 + 图片)
+- 顶部:会员信息 + [分配客服] [关闭对话] 按钮
+- 自动滚动到最新消息
+- 5s 轮询新消息 + 30s 心跳
+- 断线提示(连接中断,正在重试)
+
+## 3. 客户端基建(写到 /src/lib/)
+
+### a. /src/lib/useChatPolling.ts
+- useChatPolling(conversationId, onMessage, options)
+- 5s 轮询 + 30s 心跳 + 指数退避
+- 不依赖 WebSocket
+
+### b. /src/lib/useHeartbeat.ts
+- useHeartbeat(intervalMs=30000)
+- 检测后端是否在线
+- 失败 3 次 → 触发 onDisconnect 回调
+
+## 4. 权限矩阵(本轮新增权限位)
+
+| 模块 | product_manager | order_manager | customer_service | marketing_manager | finance_super_admin | super_admin |
+|------|----------------|---------------|------------------|-------------------|---------------------|-------------|
+| 优惠券/横幅/弹窗/排期 | 只读 | 只读 | 只读 | ✅ 全部 | 只读 | ✅ 全部 |
+| 提现审核 | ❌ | 只读 | 只读 | ❌ | ✅ | ✅ |
+| 财务流水 | ❌ | 只读(自己订单) | 只读(自己客服) | ❌ | ✅ 全部 | ✅ 全部 |
+| 银行账户 | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ 全部 |
+| 客服对话 | ❌ | 只读 | ✅ 全部 | ❌ | ❌ | ✅ 全部 |
+| 客服消息 | ❌ | 只读 | ✅ 全部 | ❌ | ❌ | ✅ 全部 |
+
+新增权限位:
+- `marketing` 模块(4 操作: can_view/can_create/can_edit/can_delete)
+- `withdrawals` 模块
+- `financial_records` 模块
+- `bank_accounts` 模块
+- `support` 模块
+
+## 5. 数据库补充(只加 model,不 migrate)
+
+在 `backend/prisma/schema.prisma` 加 model:
+- `Coupon` 表(code unique, type, value, min_order_amount, max_discount, usage_limit, used_count, valid_from, valid_until, status, created_at, updated_at)
+- `AdSchedule` 表(banner_id, popup_id, start_time, end_time, target_pages JSON, status, ...)
+- `WithdrawalRequest` 表(member_id, amount, bank_account_id, status, reason, approver_id, approved_at, ...)
+- `FinancialRecord` 表(type, member_id, order_id, amount, balance_after, description, created_at)
+- `Conversation` 表(member_id, customer_service_id, status, last_message_at, created_at, updated_at)
+- `Message` 表(conversation_id, sender_type, sender_id, content, type, read_at, created_at)
+- `BankAccount` 表(bank_name, account_number, account_holder, branch, logo_url, status, ...)
+- `HeartbeatLog` 表(server_time, status, created_at)(可选,1.0 可省)
+
+⚠️ 本轮**不 prisma migrate**,只加 schema,留给 P7 部署时一次性 migrate
+
+## 6. 验证清单(必须全 PASS)
+
+| 检查项 | 目标 |
+|--------|------|
+| TypeScript `tsc --noEmit` (后端) | 0 errors |
+| TypeScript `tsc --noEmit` (前端) | 0 errors |
+| Next.js `next build` | PASS |
+| 新增后端路由文件 | 9 个(admin-coupons/admin-banners/admin-popups/admin-ad-schedules/admin-withdrawals/admin-financial-records/admin-bank-accounts/admin-conversations/admin-messages) |
+| 新增前端页面 | 10 个(marketing 首页 + 4 子页 + finance 首页 + 3 子页 + support) |
+| 替换占位页 | 3 个(marketing / finance / support) |
+| 三语翻译 key 总数 | 目标 800+ keys(原 628 + 营销 ~50 + 财务 ~80 + 客服 ~50) |
+| logOperation 调用 | 目标 25+ 处(本轮新加) |
+| requirePermission 使用 | 目标 18+ 处(本轮新加) |
+| AdminAuthGuard 包裹 | 全部 10 个本轮新/替换页面 |
+| useAdminAuth(hasPermission) | 关键操作按钮 100% 鉴权 |
+| 触摸热区 min-h-[44px] | 100+ 处 |
+| 响应式断点 | 50+ 处 |
+| 5s 轮询实现 | useChatPolling hook |
+| 30s 心跳实现 | useHeartbeat hook |
+| **不接 WebSocket 强依赖** | 客服用轮询 + 心跳,不写 ws 客户端 |
+
+## 7. 严格禁止
+
+- ❌ 不要启动后端/前端服务
+- ❌ 不要 curl / fetch
+- ❌ 不要 prisma migrate
+- ❌ 不要修改 P1-P5-B+P5-Fix 已完成的代码(只扩展/新增)
+- ❌ 不要接 WebSocket 客户端库(socket.io-client / ws)— **零外部依赖**
+- ❌ 不要接外部客服 SDK
+- ❌ 不要接真实的银行 API(提现只人工标记)
+- ❌ 不要接 WhatsApp / 邮件 / 短信 / 推送
+- ❌ 不要在 P5-C 写分销系统(commission 类型 1.0 不上)
+- ❌ 不要改 P5-B 已修的 Sidebar 11 菜单
+- ❌ 不要改 P5-Fix 已修的物理删除
+- ❌ 不要加 shadcn 新组件(只用 Button/Card/Input/Dialog/Table/Form/Badge 7 个)
+
+## 8. 关键提示
+
+- 客服模块**核心是"消息入库" + "轮询"**,不是 WebSocket。这跟 P2 时代定的"风险 4 方案 A"一致。
+- **零外部依赖**是硬性原则 — 即使能接,也不接。
+- 财务流水是**只读**,任何修改都通过其他模块(订单/余额/提现)走,不能直接改 financial_records
+- 银行账户只 super_admin 可见(最敏感的)
+- 客服轮询失败时,UI 要明确提示,不能静默
+- 5s 轮询频率要可配置(可改成 10s / 30s),默认 5s
+- 心跳 30s 失败 3 次 → 提示"连接中断"
+- 三语翻译覆盖所有按钮 / 状态 / 弹窗
+- 客服消息气泡:左 = 会员(灰)/ 右 = 客服(蓝),时间显示
+
+等老板验收,通过后发 P6(数据统计 + 财务独立模块 + 优惠券完整 UI)。

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: toko-indonesia-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4000"
+      # Other env vars (DATABASE_URL, JWT_SECRET, etc.) set in Render dashboard

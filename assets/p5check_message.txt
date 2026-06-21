@@ -1,0 +1,238 @@
+P5-B 任务已发出(后台订单 + 凭证审核 + 评价 + 会员 + 余额 + 发货,API + UI),请**并行**开始 P5-Check 任务 — 对 P1-P5-A 累计的代码做一次**静态代码审查**,列出 5-10 个最有价值的问题。
+
+⚠️ 重要约束(必读):
+==========================================
+沙箱网络隔离,**绝对不要启动后端服务 / 不要启动前端服务 / 不要 curl / 不要 prisma migrate**
+P3 上次失败就是因为这个。P5-Check **只做"静态分析 + grep + tsc + 文档阅读"**,不验证运行时。
+==========================================
+
+==========================================
+完整需求文档(必读):
+==========================================
+ final_requirements_for_coze.md
+ development_spec.md
+(本文件包含全部 0.2 终极定稿 + 4 风险方案 + 13 细节 + 完整 P1-P7 阶段规划 + 详细架构)
+
+==========================================
+P1/P2/P3-A/P3-B/P4-A/P4-B/P5-A 累计的代码范围(本轮全部要查):
+==========================================
+- 后端: Express 5 + Prisma + JWT
+  - 路由: admin.ts / auth.ts / auth-member.ts / users.ts / categories.ts(只读) / banners.ts(只读) / popups.ts(只读) / products.ts(只读) / settings.ts(只读) / cart.ts / orders.ts / payment-proofs.ts / admin-orders.ts / admin-categories.ts / admin-products.ts / admin-shipping-methods.ts / admin-settings.ts / admin-upload.ts / admin-payment-proofs.ts(待 P5-B 完成)/ admin-reviews.ts(待 P5-B 完成)/ admin-members.ts(待 P5-B 完成)/ admin-balance.ts(待 P5-B 完成)
+  - 中间件: cors / logger / auth / memberAuth / upload / permission(requirePermission)
+  - 工具: formatIDR / getFullImageUrl / phone(isValidIndonesianPhone)/ orderStatus(7 状态机)/ jwt 相关
+- 前端: Next.js 16 + React 19 + Tailwind 4 + shadcn/ui + next-intl
+  - 公共: /src/lib/api-client / storage / useAuth / orderStatus / phone / adminApi / adminStorage / useAdminAuth / AuthGuard / AdminAuthGuard / StatusBadge
+  - 布局: /src/components/layout/Header + Footer
+  - 首页: Banner / Popup / CategoryGrid / HotProducts
+  - 商品: ProductCard / ImageGallery / ParamList / AddToCart
+  - 后台布局: /src/app/admin/layout(Sidebar 11 菜单 + Header)
+  - 公开页面: 首页 / 商品列表 / 商品详情 / login / register / cart / checkout / orders / orders/[id] / orders/[id]/payment / orders/[id]/upload-proof / member / member/profile / member/addresses
+  - 后台页面: /admin/login / /admin(仪表盘)/ /admin/products + /new + /[id] / /admin/categories + /new + /[id] / /admin/shipping-methods + /new + /[id] / /admin/settings + 6 占位页
+- 数据库: Supabase Postgres(31 张表)
+
+==========================================
+P5-Check 审查范围(按严重度优先级,每项要给出具体证据):
+==========================================
+
+## A. 安全类(高优先级,先查)
+
+### A1. 权限越权 — 后台写操作是否真的被 requirePermission 拦截?
+- 列出所有后台写路由(POST/PUT/DELETE/PATCH)
+- 对每个路由 grep requirePermission,确认 100% 覆盖
+- 对每个写操作,检查是否做了角色检查(不是只检查登录)
+- 重点查:settings 修改、PII 数据访问(用户手机/邮箱/地址)、发货操作
+
+### A2. 会员侧越权 — 会员能否访问别人的订单/地址/购物车?
+- 查 orders.ts / users.ts / cart.ts / payment-proofs.ts
+- 对每个 user_id 过滤的位置,确认不是只查主键而没查 user_id
+- 重点查:GET /api/orders/:id(必须 .where user_id = current)、GET /api/users/addresses(必须 .where user_id = current)
+
+### A3. SQL 注入 / 原始查询
+- grep $queryRaw / $executeRaw / Prisma.raw
+- 确认没有字符串拼接 user input 进 SQL
+
+### A4. 文件上传安全
+- multer 配置:文件大小限制、文件类型白名单(只 jpg/png/webp)、文件名防路径穿越
+- /uploads/* 静态托管是否暴露了 .git / .env / 其他敏感文件?
+
+### A5. 密码 / JWT 安全
+- 密码是否 bcrypt 哈希(不是明文 / SHA1)
+- JWT secret 长度 ≥ 32 字符,且从 .env 读(没硬编码)
+- JWT 过期时间合理(后台 8h?会员 24h?refresh token?)
+
+### A6. 凭证上传 — 越权上传别人的订单凭证?
+- POST /api/orders/:id/payment-proofs 必须验证订单归属
+
+## B. 数据一致性(中优先级)
+
+### B1. 软删一致性
+- 各模块软删字段:category.product.status='inactive' / member.user.status='disabled' / shipping.status='inactive' / order.status='cancelled' / review.status='hidden' / product.status='inactive'
+- 确认全部走 status 字段软删,**没有任何物理删除**(DELETE FROM / .delete())
+- 重点查 Prisma .delete() 调用,应该 0 处
+
+### B2. 状态机合法性
+- orderStatus 7 状态转换:P3-A/P4-A 有 7/7 PASS
+- 重点查:ship 操作前订单必须 approved(AI 主动补的 ship endpoint 有没有做这个校验?)
+- 重点查:取消订单(只有 pending_payment / rejected 可取消)有无实现
+
+### B3. 外键 + 索引
+- 高频查询字段有没有索引:order(user_id, status, created_at)/ payment_proof(order_id, status)/ review(product_id, status)/ product(category_id, status)
+- 列出可能缺索引的查询路径
+
+### B4. created_at / updated_at
+- 31 张表是否都有这两个字段
+- PATCH/PUT 是否自动更新 updated_at
+
+## C. 业务逻辑(中优先级)
+
+### C1. 库存管理
+- 创建订单时是否扣减库存?取消订单是否回退库存?
+- 同一商品并发下单会不会超卖?(Prisma 事务 / 原子操作)
+
+### C2. 价格一致性
+- 创建订单时,价格是从商品表读(不是从前端传)?
+- 折扣 / 优惠金额计算(虽然 1.0 没上,代码框架要预留)
+
+### C3. 凭证审核后流程
+- 同意凭证:order status approved ✓
+- 拒绝凭证:order status rejected + 拒绝原因存哪里?(payment_proofs 表?order 表?)
+- 用户重新上传凭证时,旧凭证 status='superseded' 是否真实现?
+
+### C4. 物流计算
+- 下单时,物流费用怎么算?(从 shipping_methods 读 fee?)
+- 物流方式禁用后,已有订单的物流信息怎么处理?
+
+### C5. 余额 / 支付
+- 1.0 版本只有银行转账,订单创建时是 pending_payment(未支付)
+- 上传凭证后变 pending_review
+- 余额概念在订单里有出现吗?(避免和未来余额支付混淆)
+
+## D. API 一致性(中优先级)
+
+### D1. 错误响应格式
+- 列出所有 throw new Error / res.status(4xx).json() 调用
+- 格式是否一致?{ error: 'message' } vs { code, message } vs 其他
+- 错误码是否统一?
+
+### D2. 分页参数一致性
+- page / pageSize / limit / offset
+- 全部 API 是不是都用同一套分页?
+
+### D3. JWT 中间件复用
+- 后台 auth.ts vs 会员 auth-member.ts 有没有重复实现?
+- 是否可以抽象一个统一的 verifyToken(role)?
+
+### D4. multer 配置复用
+- 凭证上传 vs 商品图上传 vs 后台上传
+- 是不是 3 份重复代码?
+
+## E. 前端(中优先级)
+
+### E1. AuthGuard 漏检
+- P4-B 报告说 AuthGuard 27 处包裹 9 页面
+- 列所有需要登录的页面,确认 100% 包裹
+- 重点查:checkout / orders / member / upload-proof 是不是都包了
+
+### E2. 三语完整性
+- P5-A 报 371 keys,目标 ≥ 400,差 29
+- grep 所有 useTranslations / getTranslations,检查 keys 全部覆盖
+- 找出 P5-A admin 段哪些字段没翻译
+
+### E3. 触摸热区完整性
+- P4-B 报 96 处 / P5-A 报 159 处
+- 重点查:小屏(< 640px)所有可点击元素是否都 ≥ 44px
+
+### E4. 状态时间线
+- 订单详情页:7 状态时间线(pending_payment → pending_review → approved → shipped → completed / rejected / cancelled)是否完整?
+- 拒绝原因是否显示?
+
+### E5. 错误处理
+- API 错误:401 / 403 / 404 / 500 用户提示
+- 网络错误 / 加载状态
+- 移动端 toast 位置(不要被键盘挡)
+
+## F. 数据库(低优先级,但要列)
+
+### F1. 31 张表清单
+- 列所有表名 + 用途,确认无遗漏
+- 关键表 schema 抽查(orders / products / users / members / payment_proofs / reviews / shipping_methods / settings / categories / banners / popups / operation_logs)
+
+### F2. 默认数据(seed)
+- 5 角色 / 5 默认账号 / 52 权限位 / 3 银行 / 4 物流 / 站点设置
+- **重点确认 finance 账号的角色是 finance_super_admin**(P5-B 第一次实装直改余额)
+
+## G. 性能 / 代码质量(低优先级)
+
+### G1. 重复代码
+- 列表渲染、表单提交、错误处理有没有抽公共组件?
+
+### G2. 魔法数字
+- 价格默认值、库存默认 0、上传大小 5MB(硬编码还是常量?)
+
+### G3. 注释完整性
+- 关键业务逻辑有没有注释?
+
+==========================================
+P5-Check 输出格式(必须严格遵守):
+==========================================
+
+按以下格式输出,5-10 个问题,**按严重度(高 → 中 → 低)排序**:
+
+```
+## P5-Check 审查报告
+
+### 审查范围
+- P1-P5-A 累计代码:[文件数] 个文件 / [行数] 行
+- 审查方法:静态分析 + grep + tsc + 文档阅读(无运行时验证)
+- 审查时间:[日期]
+
+### 问题清单(按严重度排序)
+
+#### 严重度:🔴 高(影响功能/安全,建议立即修)
+1. [问题标题]
+   - 严重度:🔴 高
+   - 类型:[A1 权限越权 / A2 会员越权 / ...]
+   - 文件:backend/src/routes/xxx.ts:行号 + 关键代码片段
+   - 描述:[问题]
+   - 风险:[可能造成的影响]
+   - 修复建议:[具体改法]
+   - 验证方法:[怎么验证修好了]
+
+2. ...
+
+#### 严重度:🟡 中(潜在 bug / 不一致)
+1. [同上格式]
+
+#### 严重度:🟢 低(代码风格 / 改进建议)
+1. [同上格式]
+
+### 总体评价
+- 整体代码质量:[优秀 / 良好 / 一般 / 需改进]
+- 关键风险:[1-2 个最值得老板拍板修的]
+- 建议下一步:[开 P5-Fix 修 / 等 P5-C 收尾时一起修 / 不修]
+```
+
+==========================================
+严禁(P5-Check 不能做):
+==========================================
+
+❌ 不要启动后端/前端服务
+❌ 不要 curl / fetch
+❌ 不要 prisma migrate
+❌ 不要修改任何代码(只审查,不改)
+❌ 不要在 P5-Check 里写新功能
+❌ 不要给完整文件(只列问题点 + 关键代码片段 5-10 行)
+❌ 不要超过 10 个问题(挑最有价值的)
+
+==========================================
+关键提示:
+==========================================
+
+- 重点查**真实风险**,不要为了凑数挑小问题
+- 严重度判断:
+  - 🔴 高:可能导致安全漏洞 / 数据丢失 / 功能不可用
+  - 🟡 中:潜在 bug / 不一致 / 未来扩展问题
+  - 🟢 低:代码风格 / 改进建议
+- 财务超管(finance_super_admin)角色 + 直改余额权限,是 1.0 版本最关键的安全点,务必重点查
+- 凭证审核 + 余额审核,涉及金钱流,务必重点查
+- 5-10 个问题里,🔴 高至少要列 2-3 个

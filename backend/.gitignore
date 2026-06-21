@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Environment variables (CRITICAL - never commit secrets)
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+dist/
+
+# User uploads
+uploads/
+
+# Local database
+*.db
+*.sqlite
+prisma/dev.db
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
